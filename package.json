@@ -1,7 +1,7 @@
 {
   "name": "basecamp-translator",
-  "version": "0.1.0",
-  "description": "An English–Spanish translation bot for Basecamp to-dos and comments, by Daniel Ch.",
+  "version": "0.2.0",
+  "description": "Automatic translation between any Google NMT-supported language pair for Basecamp to-dos and comments, by Daniel Ch.",
   "author": "Daniel Ch (https://github.com/chddaniel)",
   "license": "MIT",
   "private": true,

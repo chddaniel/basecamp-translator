@@ -1,4 +1,5 @@
 import { handleSetupRequest, prepareEnv } from "./setup";
+import { DEFAULT_PAIR, detectGoogleLanguage, matchPairLanguage, type LanguagePair } from "./languages";
 
 export interface Env {
   DB: D1Database;
@@ -15,7 +16,7 @@ export interface Env {
   SETUP_PASSWORD: string;
 }
 
-type Lang = "es" | "en";
+type Lang = string;
 
 interface WebhookEvent {
   id: number | string;
@@ -46,6 +47,10 @@ interface ProjectConfig {
   bot_person_id: string;
   enabled: number;
   monthly_char_budget: number;
+  language_a: string;
+  language_b: string;
+  language_a_name: string;
+  language_b_name: string;
 }
 
 interface Todo {
@@ -216,10 +221,9 @@ async function processComment(
   const sourceText = stripHtml(translatableContent);
   if (!sourceText) return;
 
-  const sourceLang = detectLanguage(sourceText);
-  if (!sourceLang) return;
-  const targetLang: Lang = sourceLang === "es" ? "en" : "es";
-  const sourceHash = await sha256(`${sourceLang}:${translatableContent}`);
+  if (!/\p{L}/u.test(sourceText)) return;
+  const pair = projectPair(config);
+  const sourceHash = await sha256(`${pair.a}:${pair.b}:${translatableContent}`);
 
   const prior = await env.DB.prepare(
     "SELECT 1 FROM comment_state WHERE account_id = ? AND source_comment_id = ? AND source_hash = ?",
@@ -228,7 +232,6 @@ async function processComment(
     .first();
   if (prior) return;
 
-  const label = targetLang === "en" ? "English translation" : "Traducción al español";
   const author = comment.creator?.name?.trim() || "Basecamp user";
   const time = formatCommentTime(comment.created_at ?? item.event.created_at, env.PROJECT_TIME_ZONE);
   const sourceLink = `https://app.basecamp.com/${item.accountId}/buckets/${item.projectId}/todos/${comment.parent.id}#__recording_${comment.id}`;
@@ -249,7 +252,13 @@ async function processComment(
   );
   if (alreadyPosted) return;
 
-  await chargeUsage(env.DB, item.accountId, config.monthly_char_budget, translatableContent.length);
+  await chargeUsage(env.DB, item.accountId, config.monthly_char_budget, sourceText.length);
+  const detected = await detectGoogleLanguage(sourceText, env);
+  const sourceLang = detected ? matchPairLanguage(detected, pair) : null;
+  if (!sourceLang) return; // Skip text outside the two configured languages.
+  const targetLang = sourceLang === pair.a ? pair.b : pair.a;
+  const label = `${targetLang === pair.a ? config.language_a_name : config.language_b_name} translation`;
+  await chargeUsage(env.DB, item.accountId, config.monthly_char_budget, maskRichHtml(translatableContent).masked.length);
   const translated = await translateRichHtml(translatableContent, sourceLang, targetLang, env);
   const body = `<div><strong>${escapeHtml(label)}</strong>${attribution ? ` · ${attribution}` : ""}</div>${translated}`;
   const created = await basecampPost<{ id: number | string }>(
@@ -274,59 +283,52 @@ async function processTodo(
   const todo = await basecampGet<Todo>(item.event.recording?.url!, env);
   if (todo.type !== "Todo") return;
 
-  const parsed = parseBilingualTodo(todo.content, todo.description);
+  const pair = projectPair(config);
+  const parsed = parseBilingualTodo(todo.content, todo.description, pair);
+  // Never reinterpret an existing bilingual to-do using a different pair.
+  if (!parsed && /^\[[A-Z]{2,3}(?:-[A-Z0-9]+)*\][\s\S]*?—\s*\[[A-Z]{2,3}(?:-[A-Z0-9]+)*\]/.test(todo.content)) return;
   const prior = await env.DB.prepare(
-    "SELECT es_hash, en_hash FROM todo_state WHERE account_id = ? AND todo_id = ?",
-  )
-    .bind(item.accountId, String(todo.id))
-    .first<{ es_hash: string; en_hash: string }>();
+    "SELECT es_hash AS a_hash, en_hash AS b_hash FROM todo_state WHERE account_id = ? AND todo_id = ?",
+  ).bind(item.accountId, String(todo.id)).first<{ a_hash: string; b_hash: string }>();
 
-  let esTitle: string;
-  let enTitle: string;
-  let esDescription: string;
-  let enDescription: string;
+  let aTitle = parsed?.aTitle ?? "";
+  let bTitle = parsed?.bTitle ?? "";
+  let aDescription = parsed?.aDescription ?? "";
+  let bDescription = parsed?.bDescription ?? "";
   let sourceLang: Lang;
 
   if (parsed) {
-    esTitle = parsed.esTitle;
-    enTitle = parsed.enTitle;
-    esDescription = parsed.esDescription;
-    enDescription = parsed.enDescription;
-    const esHash = await hashTodoLanguage(esTitle, esDescription);
-    const enHash = await hashTodoLanguage(enTitle, enDescription);
-    if (prior && esHash === prior.es_hash && enHash === prior.en_hash) return;
-
-    const esChanged = !prior || esHash !== prior.es_hash;
-    const enChanged = !prior || enHash !== prior.en_hash;
-    sourceLang = esChanged && !enChanged ? "es" : enChanged && !esChanged ? "en" : sourceFromActor(item, config) ?? detectLanguage(stripHtml(todo.content)) ?? "en";
+    const aHash = await hashTodoLanguage(aTitle, aDescription);
+    const bHash = await hashTodoLanguage(bTitle, bDescription);
+    if (prior && aHash === prior.a_hash && bHash === prior.b_hash) return;
+    const aChanged = !prior || aHash !== prior.a_hash;
+    const bChanged = !prior || bHash !== prior.b_hash;
+    sourceLang = aChanged && !bChanged ? pair.a : bChanged && !aChanged ? pair.b : sourceFromActor(item, config) ?? pair.a;
   } else {
-    sourceLang = sourceFromActor(item, config) ?? detectLanguage(stripHtml(todo.content)) ?? "en";
-    esTitle = sourceLang === "es" ? todo.content : "";
-    enTitle = sourceLang === "en" ? todo.content : "";
-    esDescription = sourceLang === "es" ? todo.description : "";
-    enDescription = sourceLang === "en" ? todo.description : "";
+    const text = stripHtml(removeAttachments(`${todo.content} ${todo.description}`));
+    if (!/\p{L}/u.test(text)) return;
+    await chargeUsage(env.DB, item.accountId, config.monthly_char_budget, text.length);
+    const detected = await detectGoogleLanguage(text, env);
+    const matched = detected ? matchPairLanguage(detected, pair) : sourceFromActor(item, config);
+    if (!matched) return;
+    sourceLang = matched;
+    if (sourceLang === pair.a) { aTitle = todo.content; aDescription = todo.description; }
+    else { bTitle = todo.content; bDescription = todo.description; }
   }
 
-  const sourceTitle = sourceLang === "es" ? esTitle : enTitle;
+  const sourceTitle = sourceLang === pair.a ? aTitle : bTitle;
   if (!sourceTitle.trim()) return;
-  const targetLang: Lang = sourceLang === "es" ? "en" : "es";
-
-  const sourceDescription = sourceLang === "es" ? esDescription : enDescription;
-  await chargeUsage(env.DB, item.accountId, config.monthly_char_budget, sourceTitle.length + sourceDescription.length);
+  const targetLang = sourceLang === pair.a ? pair.b : pair.a;
+  const sourceDescription = sourceLang === pair.a ? aDescription : bDescription;
+  await chargeUsage(env.DB, item.accountId, config.monthly_char_budget,
+    maskRichHtml(sourceTitle).masked.length + maskRichHtml(sourceDescription).masked.length);
   const translatedTitle = await translateRichHtml(sourceTitle, sourceLang, targetLang, env);
   const translatedDescription = sourceDescription.trim()
-    ? await translateRichHtml(sourceDescription, sourceLang, targetLang, env)
-    : "";
-  if (sourceLang === "es") {
-    enTitle = translatedTitle;
-    enDescription = translatedDescription;
-  } else {
-    esTitle = translatedTitle;
-    esDescription = translatedDescription;
-  }
-
-  const title = `[ES] ${esTitle} — [EN] ${enTitle}`;
-  const description = composeBilingualDescription(esDescription, enDescription);
+    ? await translateRichHtml(sourceDescription, sourceLang, targetLang, env) : "";
+  if (sourceLang === pair.a) { bTitle = translatedTitle; bDescription = translatedDescription; }
+  else { aTitle = translatedTitle; aDescription = translatedDescription; }
+  const title = `[${pair.a.toUpperCase()}] ${aTitle} — [${pair.b.toUpperCase()}] ${bTitle}`;
+  const description = composeBilingualDescription(aDescription, bDescription, pair);
 
   await basecampPut(
     `/todos/${todo.id}.json`,
@@ -343,9 +345,9 @@ async function processTodo(
   );
 
   await env.DB.prepare(
-    "INSERT INTO todo_state(account_id, todo_id, es_hash, en_hash, updated_at) VALUES (?, ?, ?, ?, datetime('now')) ON CONFLICT(account_id, todo_id) DO UPDATE SET es_hash=excluded.es_hash, en_hash=excluded.en_hash, updated_at=excluded.updated_at",
+    "INSERT INTO todo_state(account_id, todo_id, es_hash, en_hash, project_id, updated_at) VALUES (?, ?, ?, ?, ?, datetime('now')) ON CONFLICT(account_id, todo_id) DO UPDATE SET es_hash=excluded.es_hash, en_hash=excluded.en_hash, project_id=excluded.project_id, updated_at=excluded.updated_at",
   )
-    .bind(item.accountId, String(todo.id), await hashTodoLanguage(esTitle, esDescription), await hashTodoLanguage(enTitle, enDescription))
+    .bind(item.accountId, String(todo.id), await hashTodoLanguage(aTitle, aDescription), await hashTodoLanguage(bTitle, bDescription), item.projectId)
     .run();
 }
 
@@ -353,8 +355,9 @@ function sourceFromActor(item: QueuedEvent, config: ProjectConfig): Lang | null 
   const actor = String(item.event.creator?.id ?? "");
   const creators = parseIds(config.creator_person_ids);
   const team = parseIds(config.team_person_ids);
-  if (creators.includes(actor)) return "es";
-  if (team.includes(actor) || actor === config.bot_person_id) return "en";
+  const pair = projectPair(config);
+  if (creators.includes(actor)) return pair.a;
+  if (team.includes(actor) || actor === config.bot_person_id) return pair.b;
   return null;
 }
 
@@ -367,24 +370,31 @@ function parseIds(value: string): string[] {
   }
 }
 
+function projectPair(config: ProjectConfig): LanguagePair {
+  return { a: config.language_a ?? DEFAULT_PAIR.a, b: config.language_b ?? DEFAULT_PAIR.b };
+}
+
 function parseBilingualTodo(
-  title: string,
-  description: string,
-): { esTitle: string; enTitle: string; esDescription: string; enDescription: string } | null {
-  const match = title.match(/^\[ES\]\s*([\s\S]*?)\s+—\s+\[EN\]\s*([\s\S]*)$/);
-  if (!match) return null;
-  const esToken = description.includes("[BC-ES]") ? "[BC-ES]" : "[ES]";
-  const enToken = description.includes("[BC-EN]") ? "[BC-EN]" : "[EN]";
-  const esMarker = description.indexOf(esToken);
-  const enMarker = description.indexOf(enToken);
-  if (esMarker < 0 || enMarker < 0) {
-    return { esTitle: match[1], enTitle: match[2], esDescription: description, enDescription: "" };
-  }
+  title: string, description: string, pair: LanguagePair = DEFAULT_PAIR,
+): { aTitle: string; bTitle: string; aDescription: string; bDescription: string } | null {
+  const aLabel = pair.a.toUpperCase();
+  const bLabel = pair.b.toUpperCase();
+  const separator = ` — [${bLabel}]`;
+  const prefix = `[${aLabel}]`;
+  if (!title.startsWith(prefix)) return null;
+  const split = title.indexOf(separator, prefix.length);
+  if (split < 0) return null;
+  const aTitle = title.slice(prefix.length, split).trim();
+  const bTitle = title.slice(split + separator.length).trim();
+  const aToken = description.includes(`[BC-${aLabel}]`) ? `[BC-${aLabel}]` : prefix;
+  const bToken = description.includes(`[BC-${bLabel}]`) ? `[BC-${bLabel}]` : `[${bLabel}]`;
+  const aMarker = description.indexOf(aToken);
+  const bMarker = description.indexOf(bToken, aMarker + aToken.length);
+  if (aMarker < 0 || bMarker < 0) return { aTitle, bTitle, aDescription: description, bDescription: "" };
   return {
-    esTitle: match[1],
-    enTitle: match[2],
-    esDescription: cleanDescriptionSegment(description.slice(esMarker + esToken.length, enMarker)),
-    enDescription: cleanDescriptionSegment(description.slice(enMarker + enToken.length)),
+    aTitle, bTitle,
+    aDescription: cleanDescriptionSegment(description.slice(aMarker + aToken.length, bMarker)),
+    bDescription: cleanDescriptionSegment(description.slice(bMarker + bToken.length)),
   };
 }
 
@@ -395,14 +405,14 @@ function cleanDescriptionSegment(value: string): string {
     .trim();
 }
 
-function composeBilingualDescription(es: string, en: string): string {
-  if (!es.trim() && !en.trim()) return "";
-  const normalizedEs = normalizeRichTextAttachments(es);
-  const normalizedEn = normalizeRichTextAttachments(en);
-  const longMessage = stripHtml(normalizedEs).length + stripHtml(normalizedEn).length >= 600;
-  const marker = (language: "ES" | "EN") =>
-    longMessage ? `<h1>[${language}]</h1>` : `<div><strong>[${language}]</strong></div>`;
-  return `${marker("ES")}${normalizedEs}${marker("EN")}${normalizedEn}`;
+function composeBilingualDescription(a: string, b: string, pair: LanguagePair = DEFAULT_PAIR): string {
+  if (!a.trim() && !b.trim()) return "";
+  const normalizedA = normalizeRichTextAttachments(a);
+  const normalizedB = normalizeRichTextAttachments(b);
+  const longMessage = stripHtml(normalizedA).length + stripHtml(normalizedB).length >= 600;
+  const marker = (language: string) =>
+    longMessage ? `<h1>[${language.toUpperCase()}]</h1>` : `<div><strong>[${language.toUpperCase()}]</strong></div>`;
+  return `${marker(pair.a)}${normalizedA}${marker(pair.b)}${normalizedB}`;
 }
 
 function normalizeRichTextAttachments(value: string): string {
@@ -414,15 +424,6 @@ function normalizeRichTextAttachments(value: string): string {
 
 async function hashTodoLanguage(title: string, description: string): Promise<string> {
   return sha256(`${title}\n---\n${description}`);
-}
-
-function detectLanguage(text: string): Lang | null {
-  const value = text.toLowerCase();
-  const spanish = (value.match(/\b(el|la|los|las|que|para|con|una|por|del|este|esta|necesito|puede|gracias)\b/g) ?? []).length;
-  const english = (value.match(/\b(the|and|for|with|this|that|need|please|thanks|can|will)\b/g) ?? []).length;
-  if (/[ñ¿¡]/.test(value) || spanish >= english + 1) return "es";
-  if (english >= spanish + 1) return "en";
-  return null;
 }
 
 function stripHtml(value: string): string {
@@ -437,7 +438,7 @@ function removeAttachments(value: string): string {
 }
 
 function hasTranslationMarker(value: string): boolean {
-  return /(?:\[(?:EN translation|Traducción ES)[^\]]*\]|English translation|Traducción al español)/i.test(stripHtml(value));
+  return /^\[(?:EN translation|Traducción ES)[^\]]*\]/i.test(stripHtml(value));
 }
 
 function formatCommentTime(value?: string, timeZone = "UTC"): string {
@@ -483,6 +484,7 @@ async function translateRichHtml(html: string, sourceLang: Lang, targetLang: Lan
         q: masked,
         source: sourceLang,
         target: targetLang,
+        model: "nmt",
         format: "html",
       }),
     });

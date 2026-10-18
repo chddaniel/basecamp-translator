@@ -11,7 +11,7 @@ function rounded(x, y, w, height, r, color) {
     if (dx * dx + dy * dy <= r * r) pixel(xx, yy, color);
   }
 }
-const glyphs = { E: ['11111','10000','10000','11110','10000','10000','11111'], S: ['01111','10000','10000','01110','00001','00001','11110'], N: ['10001','11001','11001','10101','10011','10011','10001'] };
+const glyphs = { A: ['01110','10001','10001','11111','10001','10001','10001'], 文: ['00100','11111','01010','01010','00100','01010','10001'] };
 function label(text, x, y) {
   [...text].forEach((char, index) => glyphs[char].forEach((row, yy) => [...row].forEach((bit, xx) => {
     if (bit === '1') rounded(x + index * 36 + xx * 6, y + yy * 6, 6, 6, 0, [23, 99, 79]);
@@ -19,8 +19,8 @@ function label(text, x, y) {
 }
 rounded(0, 0, 256, 256, 0, [244, 247, 246]);
 rounded(8, 8, 240, 240, 48, [23, 99, 79]);
-rounded(30, 42, 112, 68, 13, [255, 255, 255]); label('ES', 53, 55);
-rounded(114, 146, 112, 68, 13, [255, 255, 255]); label('EN', 137, 159);
+rounded(30, 42, 112, 68, 13, [255, 255, 255]); label('A', 71, 55);
+rounded(114, 146, 112, 68, 13, [255, 255, 255]); label('文', 155, 159);
 // Two simple turn arrows between the language bubbles.
 rounded(170, 63, 12, 53, 4, [171, 225, 191]);
 rounded(162, 106, 28, 10, 3, [171, 225, 191]);

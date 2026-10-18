@@ -17,7 +17,7 @@ Do not put tokens, webhook URLs, private messages, or logs containing those
 values in public issues. Never replay events blindly: inspect the original
 thread for an existing translation first.
 
-The application reserves character allowance before sending a translation
+The application reserves character allowance before each detection or translation
 request. Failed requests and retries may count toward this allowance even if
 Google did not bill them. The application guard is deliberately conservative.
 
@@ -61,3 +61,17 @@ Cloudflare's button creates an independent copy in your GitHub account.
 Upstream releases do not automatically overwrite your copy. Review new release
 notes, merge the changes into your repository, and deploy with `npm run deploy`.
 Do not change the setup password during an ordinary upgrade.
+
+### Upgrading from v0.1 to v0.2
+
+Run the normal `npm run deploy` command. Migration `0003_language_pairs.sql`
+adds language settings with Spanish/English defaults, preserving the ordering
+of existing `[ES]` and `[EN]` to-dos, member preferences, tokens, hashes, and usage.
+The old `es_hash`/`en_hash` database columns are retained as generic A/B slots;
+their names do not restrict the languages supported by the application.
+
+New projects can use any pair from Google's NMT catalog. Existing project pairs
+cannot be changed once bilingual to-do state exists, to avoid relabeling earlier
+content. Old state without project IDs is protected conservatively. Language
+detection now uses Google and also consumes character allowance. Update your
+Google quotas and application allowance to suit your usage.

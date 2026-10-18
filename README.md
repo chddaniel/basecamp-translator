@@ -1,6 +1,6 @@
 # Basecamp Translator
 
-**English ↔ Spanish translations for Basecamp to-dos and comments.**
+**Automatic translation between any Google NMT-supported language pair for Basecamp to-dos and comments.**
 
 By [Daniel Ch](https://github.com/chddaniel). Free, open source, and made to save
 other teams the time we spent building it.
@@ -11,19 +11,22 @@ other teams the time we spent building it.
 
 ## What it does
 
-Write a comment in Spanish; your Translate Bot replies in English. Write in
-English; it replies in Spanish. Replies identify the original author and link
-to their comment:
+Choose two languages for each project: English ↔ Portuguese, French ↔ German,
+Japanese ↔ Arabic, or any other pair in Google's NMT language list. Write in
+either language; your Translate Bot replies in the other. Different projects
+can use different pairs, with no code changes. Replies identify the original
+author and link to their comment. For example, in a Spanish/English project:
 
 > **English translation** · Alex Rivera · 4:01 PM
 >
 > Please confirm the meeting date for the team.
 
 New or edited to-dos get both languages in the title and description, separated
-by `[ES]` and `[EN]`. Edit the appropriate language section to update the other.
+by their language codes, such as `[FR]` and `[DE]` or `[JA]` and `[AR]`. Edit the
+appropriate language section to update the other.
 Attachments stay in the original comment; attachment-only comments are skipped.
 
-This is **v0.1, a community-supported self-hosted release** of a bot we use in
+This is **v0.2, a community-supported self-hosted release** of a bot we use in
 our own projects. It covers to-dos and their comments, not Campfire, Message
 Boards, files, or other tools. It does not translate project history on install.
 
@@ -95,9 +98,20 @@ expiring, single-use state and requires your setup browser session.
 ### 4. Choose a project
 
 Select a Basecamp account and project. Verify that the displayed name/email
-really belong to your bot. Mark the people who normally write to-dos in Spanish;
-other members default to English for ambiguous to-dos. Comments use a simple
-language heuristic instead of the author's identity.
+really belong to your bot. Choose **language A** and **language B** from the
+supported-language selectors. The choices come from Google's NMT API and are
+cached for a day, so new supported languages do not require a code release.
+
+Mark the people who normally write to-dos in language A; other members use
+language B as their preference. Google detects the language of comments and new
+to-dos. Member preferences help when an unclassified to-do is ambiguous or both
+halves of a bilingual to-do change. Text detected outside the selected pair is
+skipped. Very short and mixed-language text can still be misidentified.
+
+Pick the pair before enabling. Once a project has bilingual to-dos, its pair is
+locked to avoid mislabeling their existing content. Configure another project
+for a different pair. Legacy v0.1 state lacks project IDs and is protected
+conservatively when an existing project's pair would change.
 
 Choose a monthly character allowance (default: 100,000). This is checked against
 the **shared usage for that Basecamp account**; set the same allowance on its
@@ -109,14 +123,16 @@ prevent webhook creation, it leaves translation paused and displays an error.
 
 ### 5. Try one comment
 
-In a test to-do, post something clear, such as:
+In a test to-do, post a clear sentence in one of your selected languages. For
+example, if you selected Spanish and English:
 
 ```text
 Por favor, confirma la fecha de la reunión para el equipo.
 ```
 
 The bot should reply in English shortly. Check the author and attribution, then
-try an English comment. An ambiguous message such as “OK” may be skipped.
+try a comment in the other selected language. An ambiguous message such as “OK”
+may be skipped or misidentified by language detection.
 There is no automatic paid translation test during setup.
 
 ## Costs and privacy
@@ -126,11 +142,17 @@ Google Cloud, and Basecamp accounts. Check current provider pricing; this is not
 a promise of free infrastructure. Google's NMT tier currently includes a monthly
 credit for the first 500,000 characters, then charges for additional usage.
 
+Automatic language detection is also metered. A new plain comment or to-do
+usually sends its text once for detection and once for translation. Both
+requests count toward the application's allowance and Google's usage. Updating
+one labeled half of a bilingual to-do does not require another detection call.
+The supported-language list contains metadata, not project content.
+
 - [Google Cloud Translation pricing](https://cloud.google.com/products/translate/pricing)
 - [Cloudflare Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/)
 - [Cloudflare Queues pricing](https://developers.cloudflare.com/queues/platform/pricing/)
 
-Your text goes from Basecamp to your Worker and Google Translation, and the
+Your text goes from Basecamp to your Worker and Google for detection and translation, and the
 translation returns to Basecamp. This project has no analytics, telemetry, or
 developer-operated backend. Daniel does not receive your content or credentials.
 Your own cloud providers still process/store data according to their terms.
@@ -141,18 +163,21 @@ counts, hashes, record IDs, and event status. See [operations and removal](docs/
 
 ## Limits worth knowing
 
-- **English and Spanish only.** Other languages need code changes.
+- **Any two languages supported by Google NMT per project.** This is a bilingual
+  workflow, not simultaneous translation into every project member's language.
+  The provider's [current language list](https://docs.cloud.google.com/translate/docs/languages#nmt)
+  defines coverage; the bot does not add languages or dialects Google lacks.
 - **To-dos are edited in place.** Start with a test project. The bot preserves
   the assignment/date fields it reads, but avoid simultaneous human/bot edits.
 - Comments are translated on creation; later edits to a source comment do not
   update an existing translated reply. Deleting an original does not remove its
   translation automatically.
-- Language detection is a small heuristic. Short, mixed-language, or unusual
+- Language detection uses Google's API. Short, mixed-language, or unusual
   comments can be skipped or misclassified. Machine translations need review
   where accuracy matters.
 - Links and code blocks are preserved rather than translated. To-do attachment
   references are preserved; comment attachments are omitted from replies.
-- The character guard includes HTML and retries, and does not govern other uses
+- The character guard includes detection, HTML, and retries, and does not govern other uses
   of your Google key. Configure provider quotas/billing alerts as appropriate.
 - A single bot authorization is stored per installation. Add projects accessible
   to that bot; deploy a separate copy for an unrelated bot identity.
@@ -185,6 +210,7 @@ Cloudflare's deployment button uses supported automatic resource provisioning:
 
 We needed English- and Spanish-speaking teammates to work in the same Basecamp
 project without translating every comment manually. After getting it working,
-I wanted other teams to be able to use it instead of repeating that work.
+I wanted other teams to be able to use it instead of repeating that work. The
+public version lets every project choose its own language pair.
 
 If it saves you time, that's the point. — **Daniel Ch**

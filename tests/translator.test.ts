@@ -3,12 +3,13 @@ import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import worker, { type Env, encrypt, isBasecampApiUrl, maskRichHtml, parseBilingualTodo, removeAttachments } from "../src/index";
 import { prepareEnv } from "../src/setup";
+import { matchPairLanguage, supportedLanguages } from "../src/languages";
 
 // Execute the actual migration SQL and application queries, with D1's small
 // statement interface backed by an in-memory SQLite database.
 function database() {
   const sqlite = new DatabaseSync(":memory:");
-  for (const file of ["0001_initial.sql", "0002_setup.sql"]) sqlite.exec(readFileSync(new URL(`../migrations/${file}`, import.meta.url), "utf8"));
+  for (const file of ["0001_initial.sql", "0002_setup.sql", "0003_language_pairs.sql"]) sqlite.exec(readFileSync(new URL(`../migrations/${file}`, import.meta.url), "utf8"));
   const db = {
     prepare(sql: string) {
       let values: any[] = [];
@@ -45,11 +46,12 @@ async function seedToken() {
 }
 
 function seedProject(budget = 100000) {
-  sqlite.prepare("INSERT INTO project_config VALUES ('100','200','[\"12\"]','[\"13\"]','11',1,?)").run(budget);
+  sqlite.prepare("INSERT INTO project_config(account_id,project_id,creator_person_ids,team_person_ids,bot_person_id,enabled,monthly_char_budget) VALUES ('100','200','[\"12\"]','[\"13\"]','11',1,?)").run(budget);
 }
 
-function mockServices(commentContent = "<div>Por favor, confirma la fecha para el equipo.</div>", parentType = "Todo") {
+function mockServices(commentContent = "<div>Por favor, confirma la fecha para el equipo.</div>", parentType = "Todo", detectedLanguage?: string, translatedHtml?: string) {
   const posts: { url: string; body: any }[] = [];
+  const detections: string[] = [];
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     const method = init?.method ?? "GET";
@@ -59,10 +61,23 @@ function mockServices(commentContent = "<div>Por favor, confirma la fecha para e
     if (url.endsWith("my/profile.json")) return json({ id: 11, name: "Translate Bot", email_address: "bot@example.com" });
     if (url.endsWith("projects.json")) return json([{ id: 200, name: "Example project" }]);
     if (url.endsWith("people.json")) return json([{ id: 11, name: "Translate Bot" }, { id: 12, name: "Alex <Rivera>" }, { id: 13, name: "Sam" }]);
+    if (url.includes("translation.googleapis.com") && url.includes("/languages")) return json({ data: { languages: [
+      { language: "en", name: "English" }, { language: "es", name: "Spanish" },
+      { language: "fr", name: "French" }, { language: "de", name: "German" },
+      { language: "pt", name: "Portuguese" }, { language: "ja", name: "Japanese" },
+      { language: "ar", name: "Arabic" }, { language: "ro", name: "Romanian" },
+      { language: "zh-TW", name: "Chinese (Traditional)" }, { language: "he", name: "Hebrew" },
+      { language: "ace", name: "Acehnese" },
+    ] } });
+    if (url.includes("translation.googleapis.com") && url.includes("/detect")) {
+      const text = new URLSearchParams(String(init?.body)).get("q") ?? "";
+      detections.push(text);
+      return json({ data: { detections: [[{ language: detectedLanguage ?? (text.includes("Por favor") ? "es" : "en") }]] } });
+    }
     if (url.includes("translation.googleapis.com")) {
       const params = new URLSearchParams(String(init?.body));
       posts.push({ url: "google", body: Object.fromEntries(params) });
-      return json({ data: { translations: [{ translatedText: params.get("q")?.replace("Por favor, confirma la fecha para el equipo.", "Please confirm the date for the team.") }] } });
+      return json({ data: { translations: [{ translatedText: translatedHtml ?? params.get("q")?.replace("Por favor, confirma la fecha para el equipo.", "Please confirm the date for the team.") }] } });
     }
     if (url.endsWith("comments/300.json")) return json({ id: 300, type: "Comment", parent: { id: 250, type: parentType }, bucket: { id: 200 }, creator: { id: 12, name: "Alex <Rivera>" }, content: commentContent, created_at: "2026-10-18T13:01:00Z" });
     if (url.endsWith("comments.json") && method === "GET") return json([]);
@@ -71,7 +86,7 @@ function mockServices(commentContent = "<div>Por favor, confirma la fecha para e
     throw new Error(`Unexpected mocked request: ${method} ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
-  return { posts, fetchMock };
+  return { posts, fetchMock, detections };
 }
 
 async function deliver() {
@@ -89,6 +104,36 @@ beforeEach(async () => {
 afterEach(() => { vi.unstubAllGlobals(); sqlite.close(); });
 
 describe("private guided installation", () => {
+  it("loads and caches Google's NMT catalog, including regional and three-letter codes", async () => {
+    const { fetchMock } = mockServices();
+    const first = await supportedLanguages(env);
+    expect(first.map(language => language.language)).toContain("zh-TW");
+    expect(first.map(language => language.language)).toContain("ace");
+    expect(await supportedLanguages(env)).toEqual(first);
+    const calls = fetchMock.mock.calls.filter(([url]) => String(url).includes("/languages"));
+    expect(calls).toHaveLength(1);
+    expect(new URL(String(calls[0][0])).searchParams.get("model")).toBe("nmt");
+  });
+
+  it("saves independent language pairs per project and rejects unsupported or identical choices", async () => {
+    await seedToken(); mockServices();
+    const form = { account: "100", project: "200", confirm_bot: "11", budget: "100000", language_a: "fr", language_b: "de", language_a_people: ["12"] };
+    expect((await request("/setup/enable", { ...form, language_b: "fr" })).status).toBe(400);
+    expect((await request("/setup/enable", { ...form, language_b: "not-a-language" })).status).toBe(400);
+    expect((await request("/setup/enable", form)).status).toBe(303);
+    expect((await request("/setup/enable", { ...form, project: "201", language_a: "ja", language_b: "ar" })).status).toBe(303);
+    expect(sqlite.prepare("SELECT language_a,language_b FROM project_config WHERE project_id='200'").get()).toMatchObject({ language_a: "fr", language_b: "de" });
+    expect(sqlite.prepare("SELECT language_a,language_b FROM project_config WHERE project_id='201'").get()).toMatchObject({ language_a: "ja", language_b: "ar" });
+  });
+
+  it("preserves an enabled pair when a change would relabel existing bilingual to-dos", async () => {
+    await seedToken(); seedProject(); mockServices();
+    sqlite.prepare("INSERT INTO todo_state(account_id,todo_id,es_hash,en_hash,updated_at,project_id) VALUES ('100','250','a','b','now','200')").run();
+    const response = await request("/setup/enable", { account: "100", project: "200", confirm_bot: "11", budget: "100000", language_a: "ja", language_b: "ar" });
+    expect(response.status).toBe(400);
+    expect(sqlite.prepare("SELECT enabled,language_a,language_b FROM project_config").get()).toMatchObject({ enabled: 1, language_a: "es", language_b: "en" });
+  });
+
   it("requires login, rejects cross-origin forms, and marks cookies private", async () => {
     expect(await (await request("/setup", undefined, false)).text()).toContain("Setup password");
     const rejected = await request("/setup/connect", {}, true, { origin: "https://other.example" });
@@ -132,7 +177,7 @@ describe("private guided installation", () => {
     await seedToken(); const { posts } = mockServices();
     const setup = await request("/setup?account=100&project=200");
     expect(await setup.text()).toContain("bot@example.com");
-    expect((await request("/setup/enable", { account: "100", project: "200", confirm_bot: "11", budget: "100000", spanish: ["12"] })).status).toBe(303);
+    expect((await request("/setup/enable", { account: "100", project: "200", confirm_bot: "11", budget: "100000", language_a_people: ["12"] })).status).toBe(303);
     const config = sqlite.prepare("SELECT * FROM project_config").get()!;
     expect(config.enabled).toBe(1);
     expect(config.creator_person_ids).toBe('["12"]');
@@ -144,14 +189,14 @@ describe("private guided installation", () => {
     await seedToken(); const { fetchMock } = mockServices();
     const original = fetchMock.getMockImplementation()!;
     fetchMock.mockImplementation(async (input, init) => init?.method === "POST" && String(input).endsWith("webhooks.json") ? new Response("Forbidden", { status: 403 }) : original(input, init));
-    expect((await request("/setup/enable", { account: "100", project: "200", confirm_bot: "11", budget: "100000", spanish: ["12"] })).status).toBe(400);
+    expect((await request("/setup/enable", { account: "100", project: "200", confirm_bot: "11", budget: "100000", language_a_people: ["12"] })).status).toBe(400);
     expect(sqlite.prepare("SELECT enabled FROM project_config").get()!.enabled).toBe(0);
   });
 
   it("cannot enable another account or invent a project member", async () => {
     await seedToken(); mockServices();
     expect((await request("/setup/enable", { account: "666", project: "200", confirm_bot: "11", budget: "100000" })).status).toBe(400);
-    expect((await request("/setup/enable", { account: "100", project: "200", confirm_bot: "11", budget: "100000", spanish: ["999"] })).status).toBe(400);
+    expect((await request("/setup/enable", { account: "100", project: "200", confirm_bot: "11", budget: "100000", language_a_people: ["999"] })).status).toBe(400);
     expect(sqlite.prepare("SELECT count(*) as n FROM project_config").get()!.n).toBe(0);
   });
 
@@ -165,6 +210,115 @@ describe("private guided installation", () => {
 });
 
 describe("translation pipeline", () => {
+  it("upgrades old Spanish/English rows without changing their hashes, usage or bot identity", () => {
+    const old = new DatabaseSync(":memory:");
+    try {
+      old.exec(readFileSync(new URL("../migrations/0001_initial.sql", import.meta.url), "utf8"));
+      old.prepare("INSERT INTO project_config VALUES ('100','200','[\"12\"]','[\"13\"]','11',1,100000)").run();
+      old.prepare("INSERT INTO todo_state VALUES ('100','250','original-es-hash','original-en-hash','now')").run();
+      old.prepare("INSERT INTO usage_counter VALUES ('100','2026-10',1234)").run();
+      old.exec(readFileSync(new URL("../migrations/0003_language_pairs.sql", import.meta.url), "utf8"));
+      expect(old.prepare("SELECT * FROM project_config").get()).toMatchObject({ language_a: "es", language_b: "en", bot_person_id: "11", creator_person_ids: '["12"]', enabled: 1 });
+      expect(old.prepare("SELECT * FROM todo_state").get()).toMatchObject({ es_hash: "original-es-hash", en_hash: "original-en-hash", project_id: null });
+      expect(old.prepare("SELECT characters FROM usage_counter").get()!.characters).toBe(1234);
+    } finally { old.close(); }
+  });
+
+  it.each([
+    ["fr", "de", "French", "German", "Merci de confirmer la date.", "Bitte bestätigen Sie das Datum."],
+    ["ja", "ar", "Japanese", "Arabic", "会議の日付を確認してください。", "يرجى تأكيد موعد الاجتماع."],
+    ["zh-TW", "pt", "Chinese (Traditional)", "Portuguese", "請確認會議日期。", "Confirme a data da reunião."],
+  ])("creates %s/%s to-dos and updates only the opposite side after an edit", async (a, b, aName, bName, aText, bText) => {
+    await seedToken(); seedProject();
+    sqlite.prepare("UPDATE project_config SET language_a=?,language_b=?,language_a_name=?,language_b_name=?").run(a,b,aName,bName);
+    const { posts, fetchMock, detections } = mockServices(undefined, "Todo", a);
+    const original = fetchMock.getMockImplementation()!;
+    let todo = { id: 250, type: "Todo", content: aText, description: "" };
+    const writes: any[] = [];
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("todos/250.json")) {
+        if (init?.method === "PUT") {
+          const body = JSON.parse(String(init.body)); writes.push(body); todo = { ...todo, content: body.content, description: body.description };
+        }
+        return new Response(JSON.stringify(todo));
+      }
+      if (url.includes("translation.googleapis.com") && !url.includes("/detect") && !url.includes("/languages")) {
+        const params = new URLSearchParams(String(init?.body));
+        posts.push({ url: "google", body: Object.fromEntries(params) });
+        return new Response(JSON.stringify({ data: { translations: [{ translatedText: params.get("target") === b ? bText : aText }] } }));
+      }
+      return original(input, init);
+    });
+    const ack = vi.fn(); const retry = vi.fn();
+    const event = (id: string) => ({ messages: [{ body: { accountId: "100", projectId: "200", event: { id, kind: "todo_content_updated", creator: { id: 13 }, recording: { id: 250, url: "https://3.basecampapi.com/100/todos/250.json" } } }, ack, retry }] }) as any;
+    await worker.queue(event("multilingual-todo-1"), env);
+    expect(retry).not.toHaveBeenCalled(); expect(writes).toHaveLength(1);
+    expect(writes[0].content).toBe(`[${a.toUpperCase()}] ${aText} — [${b.toUpperCase()}] ${bText}`);
+    expect(posts[0].body).toMatchObject({ source: a, target: b });
+    await worker.queue(event("multilingual-todo-2"), env);
+    expect(writes).toHaveLength(1); expect(detections).toHaveLength(1);
+    todo.content += " updated"; // edit only the B side
+    await worker.queue(event("multilingual-todo-3"), env);
+    expect(writes).toHaveLength(2); expect(detections).toHaveLength(1);
+    expect(posts[1].body).toMatchObject({ source: b, target: a });
+    expect(posts[1].body.q).toBe(`${bText} updated`);
+    expect(sqlite.prepare("SELECT project_id FROM todo_state").get()!.project_id).toBe("200");
+  });
+
+  it.each([
+    ["fr", "de", "French", "German", "Merci de confirmer la date de réunion.", "Bitte bestätigen Sie das Datum des Treffens."],
+    ["en", "pt", "English", "Portuguese", "Please confirm the meeting date.", "Por favor, confirme a data da reunião."],
+    ["ja", "ar", "Japanese", "Arabic", "会議の日付を確認してください。", "يرجى تأكيد موعد الاجتماع."],
+    ["ro", "ja", "Romanian", "Japanese", "Vă rog să confirmați data întâlnirii.", "会議の日付を確認してください。"],
+    ["he", "zh-TW", "Hebrew", "Chinese (Traditional)", "נא לאשר את מועד הפגישה.", "請確認會議日期。"],
+  ])("translates %s ↔ %s in both directions with the correct labels", async (a, b, aName, bName, aText, bText) => {
+    await seedToken(); seedProject();
+    sqlite.prepare("UPDATE project_config SET language_a=?,language_b=?,language_a_name=?,language_b_name=?").run(a, b, aName, bName);
+    for (const [source, target, text, translated, targetName] of [[a, b, aText, bText, bName], [b, a, bText, aText, aName]]) {
+      sqlite.prepare("DELETE FROM webhook_events").run(); sqlite.prepare("DELETE FROM comment_state").run();
+      const { posts, detections } = mockServices(`<div>${text}</div>`, "Todo", source, `<div>${translated}</div>`);
+      const { retry } = await deliver();
+      expect(retry).not.toHaveBeenCalled(); expect(detections).toHaveLength(1);
+      expect(posts[0].body).toMatchObject({ source, target, model: "nmt" });
+      expect(posts[1].body.content).toContain(`${targetName} translation`);
+      expect(posts[1].body.content).toContain(translated);
+      expect(posts[1].body.content).not.toContain("__BC_TAG_");
+      await deliver(); expect(detections).toHaveLength(1); expect(posts).toHaveLength(2);
+    }
+  });
+
+  it("skips a detected language outside the chosen pair instead of guessing a direction", async () => {
+    await seedToken(); seedProject();
+    const { posts, detections } = mockServices("Bonjour, merci de confirmer la date.", "Todo", "fr");
+    const { ack, retry } = await deliver();
+    expect(ack).toHaveBeenCalledOnce(); expect(retry).not.toHaveBeenCalled();
+    expect(detections).toHaveLength(1); expect(posts).toHaveLength(0);
+  });
+
+  it("counts detection toward the budget and stops before translation if it uses the remaining allowance", async () => {
+    await seedToken(); seedProject(5);
+    const { posts, detections } = mockServices("Hello", "Todo", "en");
+    await deliver();
+    expect(detections).toEqual(["Hello"]); expect(posts).toHaveLength(0);
+    expect(sqlite.prepare("SELECT characters FROM usage_counter").get()!.characters).toBe(5);
+  });
+
+  it("matches provider aliases and unambiguous regional codes without treating scripts as English", () => {
+    expect(matchPairLanguage("iw", { a: "he", b: "en" })).toBe("he");
+    expect(matchPairLanguage("jw", { a: "jv", b: "en" })).toBe("jv");
+    expect(matchPairLanguage("zh", { a: "zh-TW", b: "en" })).toBe("zh-TW");
+    expect(matchPairLanguage("zh", { a: "zh-TW", b: "zh-CN" })).toBe(null);
+    expect(matchPairLanguage("ar", { a: "ja", b: "ar" })).toBe("ar");
+  });
+
+  it("round-trips bilingual descriptions and titles for arbitrary regional/non-Latin pairs", () => {
+    const parsed = parseBilingualTodo("[JA] 会議 — [AR] اجتماع", "<h1>[JA]</h1>会議<h1>[AR]</h1>اجتماع", { a: "ja", b: "ar" });
+    expect(parsed).toMatchObject({ aTitle: "会議", bTitle: "اجتماع", aDescription: "会議", bDescription: "اجتماع" });
+    expect(parseBilingualTodo("[ZH-TW] 會議 — [PT] Reunião", "", { a: "zh-TW", b: "pt" })?.aTitle).toBe("會議");
+    expect(parseBilingualTodo("[ACE] Rapat — [AR] اجتماع", "", { a: "ace", b: "ar" })?.bTitle).toBe("اجتماع");
+  });
+
   it("makes a to-do bilingual, preserves assignment/date fields, and ignores its own update", async () => {
     await seedToken(); seedProject();
     const { posts, fetchMock } = mockServices();
@@ -228,7 +382,7 @@ describe("translation pipeline", () => {
     await deliver();
     expect(posts[0].body.source).toBe("en");
     expect(posts[0].body.target).toBe("es");
-    expect(posts[1].body.content).toContain("Traducción al español");
+    expect(posts[1].body.content).toContain("Spanish translation");
   });
 
   it("stops before calling Google when the account allowance is exhausted", async () => {
@@ -254,8 +408,8 @@ describe("translation pipeline", () => {
     const { masked, restore } = maskRichHtml(html);
     expect(restore(masked)).toBe(html);
     expect(removeAttachments('<div>Hello</div><bc-attachment sgid="x"/>')).toBe("<div>Hello</div>");
-    expect(parseBilingualTodo("[ES] Hola — [EN] Hello", "<h1>[ES]</h1>Hola<h1>[EN]</h1>Hello")?.enDescription).toBe("Hello");
-    expect(parseBilingualTodo("[ES] Hola — [EN] Hello", "<h1>[ES]</h1>Hola<h1>[EN]</h1>Hello")?.esDescription).toBe("Hola");
-    expect(parseBilingualTodo("[ES] Hola — [EN] Hello", "<div><strong>[BC-ES]</strong></div>Hola<div><strong>[BC-EN]</strong></div>Hello")?.esDescription).toBe("Hola");
+    expect(parseBilingualTodo("[ES] Hola — [EN] Hello", "<h1>[ES]</h1>Hola<h1>[EN]</h1>Hello")?.bDescription).toBe("Hello");
+    expect(parseBilingualTodo("[ES] Hola — [EN] Hello", "<h1>[ES]</h1>Hola<h1>[EN]</h1>Hello")?.aDescription).toBe("Hola");
+    expect(parseBilingualTodo("[ES] Hola — [EN] Hello", "<div><strong>[BC-ES]</strong></div>Hola<div><strong>[BC-EN]</strong></div>Hello")?.aDescription).toBe("Hola");
   });
 });

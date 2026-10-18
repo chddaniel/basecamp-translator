@@ -1,3 +1,4 @@
+import { supportedLanguages } from "./languages";
 import {
   type Env, basecampGet, basecampPost, basecampRequest, getBasecampToken,
   encrypt, sha256, escapeHtml as h, isBasecampApiUrl,
@@ -6,7 +7,7 @@ import {
 type Account = { id: number; name: string; product: string };
 type Person = { id: number; name: string; email_address?: string; client?: boolean };
 type Project = { id: number; name: string };
-type Config = { account_id: string; project_id: string; enabled: number; bot_person_id: string; monthly_char_budget: number };
+type Config = { account_id: string; project_id: string; enabled: number; bot_person_id: string; monthly_char_budget: number; language_a: string; language_b: string; language_a_name: string; language_b_name: string };
 const encoder = new TextEncoder();
 const cookieName = "translator_setup";
 const api = "https://3.basecampapi.com";
@@ -46,7 +47,7 @@ function redirect(path: string, headers: Record<string, string> = {}): Response 
 function page(content: string, status = 200): Response {
   return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Basecamp Translator · Daniel Ch</title><style>
   :root{font:17px/1.6 system-ui,sans-serif;color:#172a35;background:#f4f7f6}body{max-width:850px;margin:50px auto;padding:0 24px}h1{font-size:2.4rem;letter-spacing:-.04em;margin:0}h2{font-size:1.3rem}a{color:#16614e}header{margin-bottom:28px}main,.card{background:white;border:1px solid #dce6e1;border-radius:16px;padding:28px;margin-bottom:22px}label{display:block;margin:12px 0}input:not([type=checkbox]),select{display:block;box-sizing:border-box;padding:12px;width:100%;font:inherit;border:1px solid #b8c9c0;border-radius:7px}input[type=checkbox]{width:18px;height:18px;margin-right:8px}button,.button{display:inline-block;background:#17634f;color:white;border:0;border-radius:8px;padding:12px 20px;font:inherit;cursor:pointer;text-decoration:none}small,.muted{color:#51665b}code{overflow-wrap:anywhere;font-size:.87em}fieldset{border:1px solid #dce6e1;border-radius:8px;margin:20px 0;padding:16px}footer{font-size:.85rem;margin:24px 0}.notice{background:#eff7f2;padding:16px;border-radius:8px}details{margin:20px 0}hr{border:0;border-top:1px solid #dce6e1;margin:24px 0}
-  </style></head><body><header><h1>Basecamp Translator</h1><div class="muted">English ↔ Spanish, for teams who work in both.</div></header><main>${content}</main><footer>Made by <a href="https://github.com/chddaniel">Daniel Ch</a> · <a href="https://github.com/chddaniel/basecamp-translator">Free & open source</a> · Community-supported</footer></body></html>`, {
+  </style></head><body><header><h1>Basecamp Translator</h1><div class="muted">Two languages. One Basecamp project.</div></header><main>${content}</main><footer>Made by <a href="https://github.com/chddaniel">Daniel Ch</a> · <a href="https://github.com/chddaniel/basecamp-translator">Free & open source</a> · Community-supported</footer></body></html>`, {
     status, headers: {
       "content-type": "text/html; charset=utf-8", "cache-control": "no-store",
       "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
@@ -152,15 +153,25 @@ export async function handleSetupRequest(request: Request, env: Env): Promise<Re
       if (String(form.get("confirm_bot")) !== String(profile.id)) throw new Error("Confirm the posting identity first.");
       const people = await all<Person>(`${api}/${accountId}/projects/${projectId}/people.json`, accountId, env);
       if (!people.some(person => person.id === profile.id)) throw new Error("Add the bot to this project first.");
-      const spanish = form.getAll("spanish").map(numeric);
-      if (spanish.some(id => !people.some(person => String(person.id) === id)) || spanish.includes(String(profile.id))) throw new Error("Choose project members other than the bot.");
-      const english = people.filter(person => person.id !== profile.id && !spanish.includes(String(person.id))).map(person => String(person.id));
+      const languages = await supportedLanguages(env);
+      const languageA = languages.find(item => item.language === String(form.get("language_a") ?? "es"));
+      const languageB = languages.find(item => item.language === String(form.get("language_b") ?? "en"));
+      if (!languageA || !languageB || languageA.language === languageB.language) throw new Error("Choose two different languages supported by Google NMT.");
+      const existing = await env.DB.prepare("SELECT * FROM project_config WHERE account_id=? AND project_id=?").bind(accountId, projectId).first<Config>();
+      if (existing && (existing.language_a !== languageA.language || existing.language_b !== languageB.language)) {
+        const translatedTodos = await env.DB.prepare("SELECT 1 FROM todo_state WHERE account_id=? AND (project_id=? OR project_id IS NULL) LIMIT 1").bind(accountId, projectId).first();
+        // v0.1 state did not record project IDs: protect those older rows too.
+        if (translatedTodos) throw new Error("Bilingual to-dos already use this project's pair (or legacy v0.1 state exists). Keep the existing pair; configure a new project for another pair.");
+      }
+      const groupA = [...form.getAll("language_a_people"), ...form.getAll("spanish")].map(numeric);
+      if (groupA.some(id => !people.some(person => String(person.id) === id)) || groupA.includes(String(profile.id))) throw new Error("Choose project members other than the bot.");
+      const groupB = people.filter(person => person.id !== profile.id && !groupA.includes(String(person.id))).map(person => String(person.id));
       const budget = Number(form.get("budget"));
       if (!Number.isSafeInteger(budget) || budget < 1000 || budget > 500000) throw new Error("Choose a monthly budget between 1,000 and 500,000 characters.");
       if (!env.TRANSLATION_API_KEY) throw new Error("Set TRANSLATION_API_KEY in Worker secrets before enabling translation.");
       // Pause while configuring, so partial setup never starts translating.
-      await env.DB.prepare("INSERT INTO project_config(account_id,project_id,creator_person_ids,team_person_ids,bot_person_id,enabled,monthly_char_budget) VALUES (?,?,?,?,?,0,?) ON CONFLICT(account_id,project_id) DO UPDATE SET creator_person_ids=excluded.creator_person_ids,team_person_ids=excluded.team_person_ids,bot_person_id=excluded.bot_person_id,enabled=0,monthly_char_budget=excluded.monthly_char_budget")
-        .bind(accountId, projectId, JSON.stringify(spanish), JSON.stringify(english), String(profile.id), budget).run();
+      await env.DB.prepare("INSERT INTO project_config(account_id,project_id,creator_person_ids,team_person_ids,bot_person_id,enabled,monthly_char_budget,language_a,language_b,language_a_name,language_b_name) VALUES (?,?,?,?,?,0,?,?,?,?,?) ON CONFLICT(account_id,project_id) DO UPDATE SET creator_person_ids=excluded.creator_person_ids,team_person_ids=excluded.team_person_ids,bot_person_id=excluded.bot_person_id,enabled=0,monthly_char_budget=excluded.monthly_char_budget,language_a=excluded.language_a,language_b=excluded.language_b,language_a_name=excluded.language_a_name,language_b_name=excluded.language_b_name")
+        .bind(accountId, projectId, JSON.stringify(groupA), JSON.stringify(groupB), String(profile.id), budget, languageA.language, languageB.language, languageA.name, languageB.name).run();
       const payload = `${url.origin}/webhooks/basecamp/${env.WEBHOOK_PATH_SECRET}`;
       const hooks = await all<{ id: number; payload_url: string; active: boolean; types: string[] }>(`${api}/${accountId}/buckets/${projectId}/webhooks.json`, accountId, env);
       const hook = hooks.find(item => item.payload_url === payload);
@@ -195,11 +206,13 @@ export async function handleSetupRequest(request: Request, env: Env): Promise<Re
     const profile = await basecampGet<Person>(`${api}/${accountId}/my/profile.json`, env);
     const people = await all<Person>(`${api}/${accountId}/projects/${projectId}/people.json`, accountId, env);
     const config = await env.DB.prepare("SELECT * FROM project_config WHERE account_id=? AND project_id=?").bind(accountId, projectId).first<Config & { creator_person_ids: string }>();
-    const spanish: string[] = config ? JSON.parse(config.creator_person_ids) : [];
+    const groupA: string[] = config ? JSON.parse(config.creator_person_ids) : [];
+    const languages = await supportedLanguages(env);
+    const options = (selected: string) => languages.map(language => `<option value="${h(language.language)}"${language.language === selected ? " selected" : ""}>${h(language.name)} (${h(language.language)})</option>`).join("");
     const usage = await env.DB.prepare("SELECT characters FROM usage_counter WHERE account_id=? AND month=?").bind(accountId, new Date().toISOString().slice(0, 7)).first<{ characters: number }>();
     content += `<hr><p class="notice">Translations will be posted as <strong>${h(profile.name)}</strong>${profile.email_address ? ` (${h(profile.email_address)})` : ""}. Check this is your bot before enabling.</p><p>Status: <strong>${config?.enabled ? "Enabled" : "Paused / not configured"}</strong>. Account usage this month: ${(usage?.characters ?? 0).toLocaleString()} characters.</p>`;
     if (url.searchParams.has("saved")) content += `<p class="notice">Ready. New to-dos and to-do comments in this project will be translated. Existing history is not backfilled.</p>`;
-    content += `<form method="post" action="/setup/enable"><input type="hidden" name="account" value="${accountId}"><input type="hidden" name="project" value="${projectId}"><fieldset><legend>Who normally writes to-dos in Spanish?</legend><p><small>Other people default to English for ambiguous to-dos. Comments use text detection; short ambiguous comments may be skipped.</small></p>${people.filter(person => person.id !== profile.id).map(person => `<label><input type="checkbox" name="spanish" value="${person.id}"${spanish.includes(String(person.id)) ? " checked" : ""}>${h(person.name)}</label>`).join("")}</fieldset><label>Monthly character limit for this project (checked against shared account usage)<input type="number" name="budget" min="1000" max="500000" value="${config?.monthly_char_budget ?? 100000}" required></label><p><small>This is an application guard, not a Google billing cap. Use the same limit for projects sharing an account. Retries also consume allowance.</small></p><label><input type="checkbox" name="confirm_bot" value="${profile.id}" required>I confirm ${h(profile.name)} is the account that should post translations.</label><p>Enabling creates or updates this installation's project webhook. To-do titles and descriptions will become bilingual; comments get a separate translated reply. Text is sent to your Google Translation project.</p><button>Enable translation for this project</button></form>`;
+    content += `<form method="post" action="/setup/enable"><input type="hidden" name="account" value="${accountId}"><input type="hidden" name="project" value="${projectId}"><fieldset><legend>Project language pair</legend><label>Language A<select name="language_a">${options(config?.language_a ?? "es")}</select></label><label>Language B<select name="language_b">${options(config?.language_b ?? "en")}</select></label><p><small>Choose any two languages in Google's NMT list. Pick the pair before enabling: once this project has bilingual to-dos, its pair is locked to protect their labels.</small></p></fieldset><fieldset><legend>Who normally writes to-dos in language A?</legend><p><small>Other people use language B as their preference for ambiguous to-dos. Google detects comment and new to-do languages; text outside this pair is skipped. Very short or mixed text can be misidentified.</small></p>${people.filter(person => person.id !== profile.id).map(person => `<label><input type="checkbox" name="language_a_people" value="${person.id}"${groupA.includes(String(person.id)) ? " checked" : ""}>${h(person.name)}</label>`).join("")}</fieldset><label>Monthly character limit for this project (checked against shared account usage)<input type="number" name="budget" min="1000" max="500000" value="${config?.monthly_char_budget ?? 100000}" required></label><p><small>This is an application guard, not a Google billing cap. Use the same limit for projects sharing an account. Retries also consume allowance.</small></p><label><input type="checkbox" name="confirm_bot" value="${profile.id}" required>I confirm ${h(profile.name)} is the account that should post translations.</label><p>Enabling creates or updates this installation's project webhook. To-do titles and descriptions will become bilingual; comments get a separate translated reply. Text is sent to your Google Translation project for language detection and translation. Both consume character allowance.</p><button>Enable translation for this project</button></form>`;
     if (config?.enabled) content += `<hr><form method="post" action="/setup/pause"><input type="hidden" name="account" value="${accountId}"><input type="hidden" name="project" value="${projectId}"><button>Pause translation</button></form>`;
     return page(content);
   } catch (error) {
