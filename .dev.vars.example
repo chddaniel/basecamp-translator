@@ -1,0 +1,5 @@
+# Supply your own values in the Cloudflare deployment form.
+SETUP_PASSWORD=
+BASECAMP_CLIENT_ID=
+BASECAMP_CLIENT_SECRET=
+TRANSLATION_API_KEY=

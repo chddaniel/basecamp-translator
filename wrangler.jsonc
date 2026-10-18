@@ -1,0 +1,32 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "basecamp-translator",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-18",
+  "workers_dev": true,
+  "vars": {
+    "TRANSLATION_PROVIDER": "google_nmt",
+    "PROJECT_TIME_ZONE": "UTC"
+  },
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "basecamp-translator",
+    "database_id": "",
+    "migrations_dir": "migrations"
+  }],
+  "queues": {
+    "producers": [
+      { "binding": "TRANSLATION_QUEUE", "queue": "basecamp-translator-events" },
+      { "binding": "TRANSLATION_DLQ", "queue": "basecamp-translator-failed" }
+    ],
+    "consumers": [{
+      "queue": "basecamp-translator-events",
+      "max_batch_size": 1,
+      "max_batch_timeout": 5,
+      "max_retries": 5,
+      "retry_delay": 60,
+      "dead_letter_queue": "basecamp-translator-failed",
+      "max_concurrency": 1
+    }]
+  }
+}

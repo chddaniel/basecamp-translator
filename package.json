@@ -1,0 +1,31 @@
+{
+  "name": "basecamp-translator",
+  "version": "0.1.0",
+  "description": "An English–Spanish translation bot for Basecamp to-dos and comments, by Daniel Ch.",
+  "author": "Daniel Ch (https://github.com/chddaniel)",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "vitest run",
+    "dev": "wrangler dev",
+    "deploy": "wrangler d1 migrations apply DB --remote && wrangler deploy"
+  },
+  "repository": { "type": "git", "url": "https://github.com/chddaniel/basecamp-translator.git" },
+  "cloudflare": {
+    "bindings": {
+      "SETUP_PASSWORD": { "description": "Create a unique random password of at least 24 characters. You will use it to sign into /setup. Keep it: encryption of your Basecamp tokens depends on it." },
+      "BASECAMP_CLIENT_ID": { "description": "Client ID from your own [Basecamp OAuth application](https://launchpad.37signals.com/integrations). See the README for the callback URL." },
+      "BASECAMP_CLIENT_SECRET": { "description": "Client secret for the same Basecamp OAuth application." },
+      "TRANSLATION_API_KEY": { "description": "Your Google Cloud Translation Basic API key. Enable billing and the Cloud Translation API in your own Google project. Restrict the key to Cloud Translation API." }
+    }
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260911.1",
+    "typescript": "^5.9.2",
+    "vitest": "^5.0.5",
+    "wrangler": "^4.35.0"
+  }
+}
