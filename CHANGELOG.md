@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.2.1 — Fix Basecamp authorization renewal
+
+- Use Basecamp Launchpad's required `type=refresh` parameter when access tokens
+  expire, so translations can continue without manual reconnection.
+- Use `type=web_server` for initial authorization and code exchange too.
+- Preserve an existing refresh token when Basecamp does not rotate it, and
+  reject incomplete responses before overwriting stored credentials.
+- Add regression tests for expired tokens, successive renewals, malformed
+  responses, safe errors, and retryable translation events (40 tests total).
+
+Existing installations must redeploy the updated code. If authorization has
+already stopped working, reconnect the same bot through `/setup`; do not reset
+its password or change `SETUP_PASSWORD`. See the README's upgrade instructions.
+
 ## v0.2.0 — Configurable language pairs
 
 - Choose any two Google NMT-supported languages per Basecamp project in setup.

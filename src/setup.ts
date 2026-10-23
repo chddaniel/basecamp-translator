@@ -117,7 +117,7 @@ export async function handleSetupRequest(request: Request, env: Env): Promise<Re
       await env.DB.prepare("DELETE FROM setup_oauth_state WHERE expires_at < ?").bind(Date.now()).run();
       await env.DB.prepare("INSERT INTO setup_oauth_state(state_hash, expires_at) VALUES (?, ?)").bind(await sha256(state), Date.now() + 600000).run();
       const auth = new URL("https://launchpad.37signals.com/authorization/new");
-      auth.search = new URLSearchParams({ response_type: "code", client_id: env.BASECAMP_CLIENT_ID, redirect_uri: `${url.origin}/oauth/callback`, state }).toString();
+      auth.search = new URLSearchParams({ type: "web_server", client_id: env.BASECAMP_CLIENT_ID, redirect_uri: `${url.origin}/oauth/callback`, state }).toString();
       return redirect(auth.href);
     }
     if (url.pathname === "/oauth/callback" && request.method === "GET") {
@@ -129,11 +129,11 @@ export async function handleSetupRequest(request: Request, env: Env): Promise<Re
       if (!valid) throw new Error("Authorization expired or was already used. Start again from setup.");
       const response = await fetch("https://launchpad.37signals.com/authorization/token", {
         method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, redirect: "error",
-        body: new URLSearchParams({ grant_type: "authorization_code", code, client_id: env.BASECAMP_CLIENT_ID, client_secret: env.BASECAMP_CLIENT_SECRET, redirect_uri: `${url.origin}/oauth/callback` }),
+        body: new URLSearchParams({ type: "web_server", code, client_id: env.BASECAMP_CLIENT_ID, client_secret: env.BASECAMP_CLIENT_SECRET, redirect_uri: `${url.origin}/oauth/callback` }),
       });
       if (!response.ok) throw new Error("Basecamp could not exchange the authorization code. Start again from setup.");
       const token = await response.json() as { access_token: string; refresh_token: string; expires_in: number };
-      if (!token.access_token || !token.refresh_token || !Number.isFinite(token.expires_in)) throw new Error("Incomplete authorization response");
+      if (typeof token.access_token !== "string" || !token.access_token || typeof token.refresh_token !== "string" || !token.refresh_token || typeof token.expires_in !== "number" || !Number.isFinite(token.expires_in) || token.expires_in <= 0) throw new Error("Incomplete authorization response");
       // Reconnection must preserve the identity already configured for each account.
       const configured = (await env.DB.prepare("SELECT DISTINCT account_id, bot_person_id FROM project_config").all<Config>()).results;
       for (const config of configured) {

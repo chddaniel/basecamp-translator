@@ -1,6 +1,6 @@
 {
   "name": "basecamp-translator",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Automatic translation between any Google NMT-supported language pair for Basecamp to-dos and comments, by Daniel Ch.",
   "author": "Daniel Ch (https://github.com/chddaniel)",
   "license": "MIT",

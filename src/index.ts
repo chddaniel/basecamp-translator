@@ -580,11 +580,18 @@ async function getBasecampToken(env: Env): Promise<string> {
   const response = await fetch("https://launchpad.37signals.com/authorization/token", {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken, client_id: env.BASECAMP_CLIENT_ID, client_secret: env.BASECAMP_CLIENT_SECRET }),
+    // Launchpad implements the older OAuth dialect, not grant_type=refresh_token.
+    body: new URLSearchParams({ type: "refresh", refresh_token: refreshToken, client_id: env.BASECAMP_CLIENT_ID, client_secret: env.BASECAMP_CLIENT_SECRET }),
   });
   if (!response.ok) throw new Error(`Basecamp OAuth refresh ${response.status}`);
-  const token = (await response.json()) as { access_token: string; refresh_token: string; expires_in: number };
-  await env.DB.prepare("UPDATE oauth_token SET access_ciphertext = ?, refresh_ciphertext = ?, expires_at = ? WHERE token_name = 'basecamp'").bind(await encrypt(token.access_token, env.TOKEN_ENCRYPTION_KEY), await encrypt(token.refresh_token, env.TOKEN_ENCRYPTION_KEY), new Date(Date.now() + token.expires_in * 1000).toISOString()).run();
+  const token = (await response.json()) as { access_token?: string; refresh_token?: string; expires_in?: number };
+  if (typeof token.access_token !== "string" || !token.access_token ||
+      typeof token.expires_in !== "number" || !Number.isFinite(token.expires_in) || token.expires_in <= 0 ||
+      (token.refresh_token !== undefined && (typeof token.refresh_token !== "string" || !token.refresh_token))) {
+    throw new Error("Basecamp OAuth refresh response was incomplete");
+  }
+  // Some responses renew access without rotating the refresh token.
+  await env.DB.prepare("UPDATE oauth_token SET access_ciphertext = ?, refresh_ciphertext = ?, expires_at = ? WHERE token_name = 'basecamp'").bind(await encrypt(token.access_token, env.TOKEN_ENCRYPTION_KEY), await encrypt(token.refresh_token ?? refreshToken, env.TOKEN_ENCRYPTION_KEY), new Date(Date.now() + token.expires_in * 1000).toISOString()).run();
   return token.access_token;
 }
 

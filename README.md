@@ -26,7 +26,7 @@ by their language codes, such as `[FR]` and `[DE]` or `[JA]` and `[AR]`. Edit th
 appropriate language section to update the other.
 Attachments stay in the original comment; attachment-only comments are skipped.
 
-This is **v0.2, a community-supported self-hosted release** of a bot we use in
+This is **v0.2.1, a community-supported self-hosted release** of a bot we use in
 our own projects. It covers to-dos and their comments, not Campfire, Message
 Boards, files, or other tools. It does not translate project history on install.
 
@@ -183,6 +183,26 @@ counts, hashes, record IDs, and event status. See [operations and removal](docs/
   to that bot; deploy a separate copy for an unrelated bot identity.
 - There is no uptime guarantee or guaranteed support response. Contributions,
   reproducible bug reports, and documentation improvements are welcome.
+
+## Upgrading an existing installation
+
+Update your deployment source to **v0.2.1 or later** and redeploy your existing
+Worker. For a manual checkout, pull the update, run `npm ci`, then `npm run deploy`.
+Keep your existing Worker configuration, D1 database, queues, and secrets;
+do not replace them with a fresh installation or change `SETUP_PASSWORD`.
+
+Versions before v0.2.1 used incorrect Basecamp OAuth parameters, which could
+stop translations when the access token expired. This release fixes initial
+connection and automatic renewal using
+[Basecamp's documented OAuth parameters](https://github.com/basecamp/api/blob/master/sections/authentication.md).
+If your bot has already stopped with `Basecamp OAuth refresh 401`, sign into
+your existing `/setup` page and reconnect **the same bot account**. No password
+reset is needed. Setup rejects reconnection as a different Basecamp user.
+
+Updating does not automatically backfill missed comments. Events still in the
+queue's retry window can retry; events already moved to the dead-letter queue
+need to be replayed separately. Preserve their original event IDs so existing
+deduplication can prevent duplicate replies.
 
 ## Local development / manual installation
 

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
-import worker, { type Env, encrypt, isBasecampApiUrl, maskRichHtml, parseBilingualTodo, removeAttachments } from "../src/index";
+import worker, { type Env, encrypt, getBasecampToken, isBasecampApiUrl, maskRichHtml, parseBilingualTodo, removeAttachments } from "../src/index";
 import { prepareEnv } from "../src/setup";
 import { matchPairLanguage, supportedLanguages } from "../src/languages";
 
@@ -56,7 +56,12 @@ function mockServices(commentContent = "<div>Por favor, confirma la fecha para e
     const url = String(input);
     const method = init?.method ?? "GET";
     const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
-    if (method === "POST" && url.includes("authorization/token")) return json({ access_token: "test-access", refresh_token: "test-refresh", expires_in: 1209600 });
+    if (method === "POST" && url.includes("authorization/token")) {
+      const params = new URLSearchParams(String(init?.body));
+      expect(params.get("type")).toBe(params.has("refresh_token") ? "refresh" : "web_server");
+      expect(params.has("grant_type")).toBe(false);
+      return json({ access_token: "test-access", refresh_token: "test-refresh", expires_in: 1209600 });
+    }
     if (url.includes("authorization.json")) return json({ accounts: [{ id: 100, name: "Example team", product: "bc3" }] });
     if (url.endsWith("my/profile.json")) return json({ id: 11, name: "Translate Bot", email_address: "bot@example.com" });
     if (url.endsWith("projects.json")) return json([{ id: 200, name: "Example project" }]);
@@ -147,6 +152,7 @@ describe("private guided installation", () => {
     mockServices();
     const start = await request("/setup/connect", {});
     const auth = new URL(start.headers.get("location")!);
+    expect(auth.searchParams.get("type")).toBe("web_server");
     expect(auth.searchParams.get("redirect_uri")).toBe(`${origin}/oauth/callback`);
     const callback = `/oauth/callback?code=test-code&state=${auth.searchParams.get("state")}`;
     expect((await request(callback)).status).toBe(303);
@@ -206,6 +212,70 @@ describe("private guided installation", () => {
     await deliver();
     expect(posts).toHaveLength(0);
     expect(sqlite.prepare("SELECT enabled FROM project_config").get()!.enabled).toBe(0);
+  });
+});
+
+describe("OAuth token renewal", () => {
+  async function expiredToken() {
+    await seedToken();
+    sqlite.prepare("UPDATE oauth_token SET expires_at='2000-01-01T00:00:00Z'").run();
+    return prepareEnv(env);
+  }
+
+  it("refreshes an expired token and continues translating, then reuses the renewed token", async () => {
+    await expiredToken(); seedProject();
+    const { fetchMock, posts } = mockServices();
+    const { ack, retry } = await deliver();
+    expect(ack).toHaveBeenCalledOnce(); expect(retry).not.toHaveBeenCalled();
+    expect(posts.some(post => post.url.endsWith("comments.json"))).toBe(true);
+    const prepared = await prepareEnv(env);
+    expect(await getBasecampToken(prepared)).toBe("test-access");
+    const refreshes = fetchMock.mock.calls.filter(([url]) => String(url).includes("authorization/token"));
+    expect(refreshes).toHaveLength(1);
+    const body = new URLSearchParams(String(refreshes[0][1]?.body));
+    expect(Object.fromEntries(body)).toEqual({ type: "refresh", refresh_token: "test-refresh", client_id: "test-client", client_secret: "test-secret" });
+    expect(Date.parse(String(sqlite.prepare("SELECT expires_at FROM oauth_token").get()!.expires_at))).toBeGreaterThan(Date.now());
+  });
+
+  it.each([true, false])("preserves the usable refresh token across successive renewals (rotation=%s)", async (rotates) => {
+    const prepared = await expiredToken();
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (_input, init) => {
+      const body = new URLSearchParams(String(init?.body));
+      expect(body.get("refresh_token")).toBe(calls === 0 || !rotates ? "test-refresh" : "rotated-refresh");
+      calls++;
+      return Response.json({ access_token: "renewed-access", expires_in: 1209600, ...(rotates ? { refresh_token: "rotated-refresh" } : {}) });
+    }));
+    expect(await getBasecampToken(prepared)).toBe("renewed-access");
+    sqlite.prepare("UPDATE oauth_token SET expires_at='2000-01-01T00:00:00Z'").run();
+    expect(await getBasecampToken(prepared)).toBe("renewed-access");
+    expect(calls).toBe(2);
+  });
+
+  it.each([
+    {}, { access_token: "new-access" }, { access_token: "new-access", expires_in: 0 },
+    { access_token: "new-access", expires_in: -1 }, { access_token: "new-access", expires_in: "1209600" },
+    { access_token: "new-access", expires_in: 1209600, refresh_token: "" },
+  ])("does not overwrite credentials after an incomplete response: %j", async (payload) => {
+    const prepared = await expiredToken();
+    const before = sqlite.prepare("SELECT * FROM oauth_token").get();
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(payload)));
+    await expect(getBasecampToken(prepared)).rejects.toThrow("refresh response was incomplete");
+    expect(sqlite.prepare("SELECT * FROM oauth_token").get()).toEqual(before);
+  });
+
+  it("keeps failed events retryable without exposing the provider's response", async () => {
+    await expiredToken(); seedProject();
+    const before = sqlite.prepare("SELECT * FROM oauth_token").get();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("sensitive-provider-response", { status: 401 })));
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { ack, retry } = await deliver();
+      expect(retry).toHaveBeenCalledOnce(); expect(ack).not.toHaveBeenCalled();
+      expect(sqlite.prepare("SELECT status FROM webhook_events").get()!.status).toBe("pending");
+      expect(sqlite.prepare("SELECT * FROM oauth_token").get()).toEqual(before);
+      expect(JSON.stringify(log.mock.calls)).not.toContain("sensitive-provider-response");
+    } finally { log.mockRestore(); }
   });
 });
 
